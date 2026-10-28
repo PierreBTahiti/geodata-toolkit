@@ -16,6 +16,9 @@ from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 API = "https://hubeau.eaufrance.fr/api/v1/temperature/chronique"
+API_STATION ="https://hubeau.eaufrance.fr/api/v1/temperature/station"
+
+
 
 
 
@@ -25,19 +28,27 @@ params = {
 
 response = requests.get(API, params=params, timeout=30)
 response.raise_for_status()
-
 payload = response.json()
 records = payload.get("data", [])
-
 df = pd.DataFrame(records)
 
-print(f"Nombre de mesures récupérées : {len(df)}")
-print("Colonnes disponibles :")
-print(df.columns.tolist())
-print(df.head())
+response_station = requests.get(API_STATION, params=params, timeout=30)
+response_station.raise_for_status()
+payload_station = response_station.json()
+records_station = payload_station.get("data", [])
+df_station = pd.DataFrame(records_station)
+
+
+
+
+# print(f"Nombre de mesures récupérées : {len(df)}")
+# print("Colonnes disponibles :")
+# print(df.columns.tolist())
+# print(df.head())
 
 # Export pour pouvoir examiner les données
-#df.to_csv("outputs\\mesures_temperature.csv", index=False)
+df_station.to_csv("outputs\\stations_temperature.csv", index=False)
+print(df_station)
 
 # Conversion des champs en types exploitables
 df["date_mesure_temp"] = pd.to_datetime(
@@ -55,68 +66,28 @@ df["date_mesure_temp"] = df["date_mesure_temp"].dt.normalize()
 df = df.groupby("date_mesure_temp", as_index=False)["resultat"].mean()
 df = df.sort_values("date_mesure_temp")
 
-print(df)
+df_station["latitude"] = pd.to_numeric(
+    df_station["latitude"],
+    errors="coerce"
+)
+df_station["longitude"] = pd.to_numeric(
+    df_station["longitude"],
+    errors="coerce"
+)
+df_station["coordonnee_x"] = pd.to_numeric(
+    df_station["coordonnee_x"],
+    errors="coerce"
+)
+df_station["coordonnee_y"] = pd.to_numeric(
+    df_station["coordonnee_y"],
+    errors="coerce"
+)
+
+df_station = df_station.dropna(subset=["latitude", "longitude"])
 
 
 
 
-
-
-# #Visualisation
-# plt.figure(figsize=(12, 5))
-# plt.plot(
-#     df["date_mesure_temp"],
-#     df["resultat"],
-#     linewidth=1
-# )
-
-# plt.title("Température mesurée dans les cours d'eau")
-# plt.xlabel("Date")
-# locator = mdates.AutoDateLocator(minticks=10, maxticks=30)
-# plt.gca().xaxis.set_major_locator(locator)
-# #plt.gca().xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-# plt.xticks(rotation=45, ha="right")
-
-
-# plt.ylabel("Température (°C)")
-# plt.grid(True, alpha=0.3)
-# plt.tight_layout()
-# plt.show()
-
-# import matplotlib.pyplot as plt
-# import matplotlib.dates as mdates
-
-# fig, ax = plt.subplots(figsize=(12, 5))
-
-# ax.plot(df["date_mesure_temp"], df["resultat"])
-
-
-
-# @st.cache_data(ttl=3600)
-# #param : "date_debut_mesure": (date.today() - timedelta(days=365 * 3)).isoformat(),
-# def recuperer_mesures():
-# 	params = {
-# 		"size": 2000,
-# 	}
-# 	reponse = requests.get(API, params=params, timeout=30)
-# 	reponse.raise_for_status()
-# 	return reponse.json().get("data", [])
-
-
-# def champ(ligne, *noms):
-# 	return next((ligne[n] for n in noms if ligne.get(n) not in (None, "")), None)
-
-
-# st.set_page_config(page_title="Température des rivières", layout="wide")
-# st.title("Température des cours d'eau en France")
-# st.write("Mesures de température issues de l'API publique **Hub'Eau**.")
-
-# try:
-# 	with st.spinner("Chargement des mesures…"):
-# 		enregistrements = recuperer_mesures()
-# except requests.RequestException as erreur:
-# 	st.error(f"L'API Hub'Eau est momentanément inaccessible : {erreur}")
-# 	st.stop()
 
 # points = []
 # for ligne in enregistrements:
