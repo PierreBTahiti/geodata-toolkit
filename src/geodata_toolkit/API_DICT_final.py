@@ -22,27 +22,15 @@ def geocode_address(address: str):
 
 def recuperer_donnees_grdf(taille, commune=None, lon=None, lat=None):
     """Récupère des enregistrements du dataset GRDF en service."""
-    url = (
-        "https://opendata.grdf.fr/api/explore/v2.1/catalog/datasets/"
-        "cartographie-du-reseau-grdf-en-service/records"
+    GRDF_API = ( "https://opendata.grdf.fr/api/explore/v2.1/catalog/datasets/" 
+                "cartographie-du-reseau-grdf-en-service/records"
     )
-    params = {"limit": taille}
-    if commune:
-        params["where"] = f"code_insee = '{commune}'"
 
-    response = requests.get(url, params=params, timeout=30)
-    if commune and response.ok:
-        donnees = response.json()
-        if donnees.get("results"):
-            return donnees
+    params = {
+           "size": taille,
+           "qs": f"code_insee_administratif:{commune}" if commune else None}
 
-    # Si le filtre par commune n'est pas disponible ou ne renvoie rien,
-    # recherche autour des coordonnées de l'adresse.
-    params = {"limit": taille}
-    if lon is not None and lat is not None:
-        params["geofilter.distance"] = f"geo_point_2d,{lat},{lon},5000"
-
-    response = requests.get(url, params=params, timeout=30)
+    response = requests.get(GRDF_API, params=params, timeout=30)
     response.raise_for_status()
     return response.json()
 
@@ -97,14 +85,15 @@ if __name__ == "__main__":
     donnees2 = tester_api_enedis(dataset2, commune=commune)
     donnees_grdf = recuperer_donnees_grdf(taille=200, commune=commune, lon=lon, lat=lat)
     #print("#######")
-    #print(donnees["results"])
+    print(donnees_grdf["results"])
     df_lignes1 = convertir_lignes(donnees["results"])
     df_lignes2 = convertir_lignes(donnees2["results"])
     df_lignes_3 = convertir_lignes(donnees_grdf["results"])
 
     df_lignes1["reseau"] = "HTA"
     df_lignes2["reseau"] = "BT"
-    df_lignes = pd.concat([df_lignes1, df_lignes2], ignore_index=True)
+    df_lignes_3["reseau"] = "GRDF"
+    df_lignes = pd.concat([df_lignes1, df_lignes2, df_lignes_3], ignore_index=True)
     print(df_lignes)
 
     donnees_grdf = recuperer_donnees_grdf(
@@ -137,7 +126,7 @@ if __name__ == "__main__":
         lambda geom: list(geom.coords) if geom.geom_type == "LineString" else []
     )
 
-    couleurs_reseau = {"HTA": [255, 90, 0], "BT": [0, 100, 255]}
+    couleurs_reseau = {"HTA": [255, 90, 0], "BT": [0, 100, 255], "GRDF": [0, 255, 0]}
     gdf_carte["couleur"] = gdf_carte["reseau"].map(couleurs_reseau)
 
     gdf_carte = gdf_carte[gdf_carte["coordinates"].map(len) > 1]
@@ -164,7 +153,7 @@ if __name__ == "__main__":
             pdk.Deck(
                 layers=[couche],
                 initial_view_state=vue,
-                tooltip={"text": "Réseau Enedis BT"},
+                tooltip={"text": "Réseau Enedis HTA, BT et GRDF"},
             )
         )
     else:
