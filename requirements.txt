@@ -1,0 +1,11 @@
+folium
+geopandas
+matplotlib
+numpy
+pandas
+Pillow
+pydeck
+requests
+shapely
+streamlit
+streamlit-folium
