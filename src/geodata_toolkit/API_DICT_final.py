@@ -672,7 +672,7 @@ if __name__ == "__main__":
         "L’export GRDF ne filtre pas à cette emprise : les lignes communales "
         "sont téléchargées puis découpées à la zone."
     )
-    col_hta, col_bt, col_enedis, col_grdf = st.columns(4)
+    col_hta, col_bt, col_grdf = st.columns(3)
     col_hta.metric("Enedis HTA", f"{total_hta:,}".replace(",", " "))
     col_bt.metric("Enedis BT", f"{total_bt:,}".replace(",", " "))
     col_grdf.metric("GRDF", f"{total_grdf:,}".replace(",", " "))
@@ -981,8 +981,9 @@ if __name__ == "__main__":
                         int(couleurs_defaut[reseau][i:i + 2], 16)
                         for i in (1, 3, 5)
                     ],
-                    get_width=0.5,
-                    width_min_pixels=0.5,
+                    get_width=1.25,
+                    width_units="'pixels'",
+                    width_min_pixels=1.25,
                     pickable=True,
                 )
             )
