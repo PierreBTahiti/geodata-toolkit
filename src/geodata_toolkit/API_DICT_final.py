@@ -14,6 +14,7 @@ import folium
 from folium.plugins import Draw
 from pyproj import Geod
 from shapely.geometry import Point, box, mapping, shape
+from shapely.ops import substring
 import pandas as pd
 from streamlit_folium import st_folium
 from urllib.parse import quote, urlencode
@@ -337,6 +338,30 @@ def tester_api_enedis(dataset: str, commune: str, emprise: dict):
     return resultats
 
 
+def creer_chemins_pointilles(lignes: gpd.GeoDataFrame) -> list:
+    """Découpe les lignes BT en tirets de 18 m séparés par des intervalles de 10 m."""
+    lignes_metriques = lignes.to_crs("EPSG:2154")
+    tirets = []
+    for ligne in lignes_metriques.geometry:
+        longueur = ligne.length
+        debut = 0.0
+        while debut < longueur:
+            fin = min(debut + 18, longueur)
+            tiret = substring(ligne, debut, fin)
+            if tiret.geom_type == "LineString" and not tiret.is_empty:
+                tirets.append(tiret)
+            debut += 28
+
+    if not tirets:
+        return []
+
+    tirets_wgs84 = gpd.GeoSeries(tirets, crs="EPSG:2154").to_crs("EPSG:4326")
+    return [
+        {"coordinates": list(tiret.coords), "info": "Réseau : BT"}
+        for tiret in tirets_wgs84
+    ]
+
+
 def echantillonner_polyligne(
     coordinates: list,
     nombre_points_minimum: int = 10,
@@ -443,7 +468,7 @@ def afficher_outil_profil_terrain(
     """Affiche la carte de mesure et le profil altimétrique."""
     st.subheader("Mesurer une distance et voir le profil du terrain")
     st.caption(
-        "Utilise l’outil polyligne en haut à gauche de la carte, puis clique "
+        "Utilise l’outil polyligne en haut à gauche de la carte, puis double-clique "
         "sur le dernier point pour terminer le tracé."
     )
     colonne_carte, colonne_profil = st.columns((1.4, 1))
@@ -466,9 +491,12 @@ def afficher_outil_profil_terrain(
                 folium.GeoJson(
                     lignes_reseau.to_json(),
                     name=f"Réseau {reseau}",
-                    style_function=lambda _, couleur=couleur: {
+                    style_function=lambda _, couleur=couleur, pointille=(
+                        reseau == "BT"
+                    ): {
                         "color": couleur,
-                        "weight": 3,
+                        "weight": 1.5,
+                        "dashArray": "8, 8" if pointille else None,
                     },
                     tooltip=folium.GeoJsonTooltip(
                         fields=["reseau"],
@@ -727,14 +755,14 @@ if __name__ == "__main__":
     gdf_carte["info"] = "Réseau : " + gdf_carte["reseau"].astype(str)
 
     couleurs_defaut = {
-        "HTA": "#FF5A00",
-        "BT": "#0064FF",
-        "GRDF": "#00FF00",
+        "HTA": "#E53935",
+        "BT": "#E53935",
+        "GRDF": "#F2C500",
     }
     ligne_reseau = {
-        "HTA": ":red[━━━]",
-        "BT": ":blue[━━━]",
-        "GRDF": ":green[━━━]",
+        "HTA": ":red[━━━━]",
+        "BT": ":red[╌ ╌ ╌]",
+        "GRDF": ":orange[━━━━]",
     }
     reseaux_affiches = st.sidebar.pills(
         "Réseaux à afficher",
@@ -965,23 +993,32 @@ if __name__ == "__main__":
         )
 
     if not gdf_carte.empty:
-        couches.extend([
-            pdk.Layer(
-                "PathLayer",
-                data=gdf_carte[gdf_carte["reseau"] == reseau],
-                get_path="coordinates",
-                get_color=[
-                    int(couleurs_defaut[reseau][i:i + 2], 16)
-                    for i in (1, 3, 5)
-                ],
-                get_width=1,
-                width_min_pixels=1,
-                pickable=True,
+        for reseau in couleurs_defaut:
+            if reseau not in reseaux_affiches:
+                continue
+            lignes_reseau = gdf_carte[gdf_carte["reseau"] == reseau]
+            if lignes_reseau.empty:
+                continue
+
+            donnees_reseau = (
+                creer_chemins_pointilles(lignes_reseau)
+                if reseau == "BT"
+                else lignes_reseau
             )
-            for reseau in couleurs_defaut
-            if reseau in reseaux_affiches
-            and not gdf_carte[gdf_carte["reseau"] == reseau].empty
-        ])
+            couches.append(
+                pdk.Layer(
+                    "PathLayer",
+                    data=donnees_reseau,
+                    get_path="coordinates",
+                    get_color=[
+                        int(couleurs_defaut[reseau][i:i + 2], 16)
+                        for i in (1, 3, 5)
+                    ],
+                    get_width=0.5,
+                    width_min_pixels=0.5,
+                    pickable=True,
+                )
+            )
 
     couches.append(
         pdk.Layer(
