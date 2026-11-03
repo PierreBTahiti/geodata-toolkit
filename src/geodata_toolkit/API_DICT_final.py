@@ -10,9 +10,16 @@ from zipfile import BadZipFile, ZipFile
 import geopandas as gpd
 import streamlit as st
 import pydeck as pdk
+import folium
+from folium.plugins import Draw
+from pyproj import Geod
 from shapely.geometry import Point, box, mapping, shape
 import pandas as pd
+from streamlit_folium import st_folium
 from urllib.parse import quote, urlencode
+
+
+GEOD_WGS84 = Geod(ellps="WGS84")
 
 
 @st.cache_data(ttl=3600, max_entries=256, show_spinner=False)
@@ -330,6 +337,254 @@ def tester_api_enedis(dataset: str, commune: str, emprise: dict):
     return resultats
 
 
+def echantillonner_polyligne(
+    coordinates: list,
+    nombre_points_minimum: int = 10,
+) -> tuple[float, list, list]:
+    """Mesure une polyligne et génère des points réguliers pour son profil."""
+    nombre_points_minimum = max(10, min(100, int(nombre_points_minimum)))
+    points = []
+    for coordinate in coordinates:
+        if not isinstance(coordinate, (list, tuple)) or len(coordinate) < 2:
+            raise ValueError("La polyligne contient des coordonnées invalides.")
+        longitude, latitude = float(coordinate[0]), float(coordinate[1])
+        if (
+            not math.isfinite(longitude)
+            or not math.isfinite(latitude)
+            or not -180 <= longitude <= 180
+            or not -90 <= latitude <= 90
+        ):
+            raise ValueError("La polyligne contient des coordonnées invalides.")
+        points.append((longitude, latitude))
+
+    if len(points) < 2:
+        raise ValueError("Trace une polyligne composée d’au moins deux points.")
+
+    segments = []
+    for depart, arrivee in zip(points, points[1:]):
+        azimut, _, longueur = GEOD_WGS84.inv(*depart, *arrivee)
+        if longueur > 0:
+            segments.append((depart, azimut, longueur))
+
+    longueur_totale = sum(segment[2] for segment in segments)
+    if longueur_totale <= 0:
+        raise ValueError("La polyligne doit avoir une longueur supérieure à zéro.")
+
+    nombre_points = min(
+        100,
+        max(nombre_points_minimum, math.ceil(longueur_totale / 25) + 1),
+    )
+    distances = [
+        longueur_totale * index / (nombre_points - 1)
+        for index in range(nombre_points)
+    ]
+    echantillons = []
+    indice_segment = 0
+    debut_segment = 0.0
+    for distance in distances:
+        while (
+            indice_segment < len(segments) - 1
+            and distance > debut_segment + segments[indice_segment][2]
+        ):
+            debut_segment += segments[indice_segment][2]
+            indice_segment += 1
+        depart, azimut, longueur = segments[indice_segment]
+        longitude, latitude, _ = GEOD_WGS84.fwd(
+            *depart,
+            azimut,
+            min(distance - debut_segment, longueur),
+        )
+        echantillons.append((longitude, latitude))
+
+    return longueur_totale, distances, echantillons
+
+
+@st.cache_data(ttl=86400, max_entries=64, show_spinner=False)
+def recuperer_altitudes(echantillons: tuple) -> list:
+    """Récupère les altitudes RGE ALTI de l’IGN aux points du profil."""
+    response = requests.get(
+        "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json",
+        params={
+            "lon": "|".join(f"{longitude:.6f}" for longitude, _ in echantillons),
+            "lat": "|".join(f"{latitude:.6f}" for _, latitude in echantillons),
+            "resource": "ign_rge_alti_wld",
+            "delimiter": "|",
+            "measures": "false",
+            "zonly": "true",
+            "indent": "false",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    resultat = response.json()
+    altitudes = resultat.get("elevations") if isinstance(resultat, dict) else None
+    if not isinstance(altitudes, list) or len(altitudes) != len(echantillons):
+        raise ValueError("Le service IGN n’a pas renvoyé toutes les altitudes.")
+    if any(altitude is None for altitude in altitudes):
+        raise ValueError("L’altitude est indisponible sur une partie du tracé.")
+    try:
+        altitudes = [float(altitude) for altitude in altitudes]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Le service IGN a renvoyé des altitudes invalides.") from exc
+    if not all(math.isfinite(altitude) for altitude in altitudes):
+        raise ValueError("Le service IGN a renvoyé des altitudes invalides.")
+    return altitudes
+
+
+def afficher_outil_profil_terrain(
+    vue,
+    lon: float,
+    lat: float,
+    gdf_carte: gpd.GeoDataFrame,
+    couleurs_defaut: dict,
+    reseaux_affiches: list,
+    zoom_carte: float,
+):
+    """Affiche la carte de mesure et le profil altimétrique."""
+    st.subheader("Mesurer une distance et voir le profil du terrain")
+    st.caption(
+        "Utilise l’outil polyligne en haut à gauche de la carte, puis clique "
+        "sur le dernier point pour terminer le tracé."
+    )
+    colonne_carte, colonne_profil = st.columns((1.4, 1))
+    with colonne_carte:
+        carte_mesure = folium.Map(
+            location=[vue.latitude, vue.longitude],
+            zoom_start=min(18, max(12, round(zoom_carte))),
+            control_scale=True,
+        )
+        folium.Marker(
+            [lat, lon],
+            tooltip="Adresse recherchée",
+        ).add_to(carte_mesure)
+        for reseau, couleur in couleurs_defaut.items():
+            lignes_reseau = gdf_carte[
+                (gdf_carte["reseau"] == reseau)
+                & (gdf_carte["reseau"].isin(reseaux_affiches))
+            ]
+            if not lignes_reseau.empty:
+                folium.GeoJson(
+                    lignes_reseau.to_json(),
+                    name=f"Réseau {reseau}",
+                    style_function=lambda _, couleur=couleur: {
+                        "color": couleur,
+                        "weight": 3,
+                    },
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=["reseau"],
+                        aliases=["Réseau :"],
+                    ),
+                ).add_to(carte_mesure)
+        Draw(
+            export=False,
+            position="topleft",
+            draw_options={
+                "polyline": {
+                    "allowIntersection": False,
+                    "shapeOptions": {"color": "#e63946", "weight": 4},
+                },
+                "polygon": False,
+                "rectangle": False,
+                "circle": False,
+                "circlemarker": False,
+                "marker": False,
+            },
+            edit_options={"edit": False, "remove": True},
+        ).add_to(carte_mesure)
+        folium.LayerControl(collapsed=True).add_to(carte_mesure)
+        resultat_mesure = st_folium(
+            carte_mesure,
+            key="carte_mesure_profil",
+            height=540,
+            returned_objects=["all_drawings"],
+            use_container_width=True,
+        )
+
+    with colonne_profil:
+        nombre_points_minimum = st.slider(
+            "Nombre minimal de points du profil",
+            min_value=10,
+            max_value=100,
+            value=10,
+            step=10,
+            help=(
+                "Les tracés longs sont automatiquement échantillonnés plus "
+                "densément, avec un maximum de 100 points."
+            ),
+        )
+        if not isinstance(resultat_mesure, dict):
+            st.error("La carte n’a pas renvoyé les données du tracé.")
+            tracés = []
+        else:
+            tracés = resultat_mesure.get("all_drawings")
+        tracés = tracés or []
+        if not isinstance(tracés, list):
+            st.error("La carte a renvoyé un tracé dans un format inattendu.")
+            tracés = []
+        polyligne = None
+        for dessin in reversed(tracés):
+            if not isinstance(dessin, dict):
+                continue
+            geometrie = dessin.get("geometry")
+            if isinstance(geometrie, dict) and geometrie.get("type") == "LineString":
+                polyligne = geometrie.get("coordinates")
+                break
+        if polyligne is not None:
+            try:
+                longueur, distances, echantillons = echantillonner_polyligne(
+                    polyligne,
+                    nombre_points_minimum,
+                )
+            except (TypeError, ValueError) as exc:
+                st.error(f"Impossible de mesurer le tracé : {exc}")
+            else:
+                st.metric(
+                    "Longueur du tracé",
+                    (
+                        f"{longueur:,.0f} m".replace(",", " ")
+                        if longueur < 1000
+                        else f"{longueur / 1000:,.2f} km".replace(",", " ")
+                    ),
+                )
+                try:
+                    with st.spinner("Calcul du profil altimétrique IGN…"):
+                        altitudes = recuperer_altitudes(tuple(echantillons))
+                except (requests.RequestException, ValueError) as exc:
+                    st.error(f"Impossible de charger le profil altimétrique : {exc}")
+                else:
+                    denivele_positif = sum(
+                        max(altitude_suivante - altitude, 0)
+                        for altitude, altitude_suivante in zip(
+                            altitudes, altitudes[1:]
+                        )
+                    )
+                    st.metric(
+                        "Dénivelé positif",
+                        f"{denivele_positif:,.0f} m".replace(",", " "),
+                    )
+                    profil = pd.DataFrame(
+                        {
+                            "Distance (m)": distances,
+                            "Altitude (m)": altitudes,
+                        }
+                    )
+                    st.line_chart(
+                        profil,
+                        x="Distance (m)",
+                        y="Altitude (m)",
+                        alt="Profil altimétrique du tracé",
+                    )
+                    st.caption(
+                        f"Profil indicatif issu du modèle RGE ALTI de l’IGN : "
+                        f"{len(altitudes)} points, espacés d’environ "
+                        f"{longueur / (len(altitudes) - 1):,.0f} m. "
+                        "Échantillonnage automatique tous les 25 m environ, "
+                        "avec un maximum de 100 points."
+                    )
+        else:
+            st.info("Trace une polyligne sur la carte pour mesurer sa longueur.")
+
+
 
 
 
@@ -420,10 +675,6 @@ if __name__ == "__main__":
     col_hta, col_bt, col_enedis, col_grdf = st.columns(4)
     col_hta.metric("Enedis HTA", f"{total_hta:,}".replace(",", " "))
     col_bt.metric("Enedis BT", f"{total_bt:,}".replace(",", " "))
-    col_enedis.metric(
-        "Total Enedis",
-        f"{total_hta + total_bt:,}".replace(",", " "),
-    )
     col_grdf.metric("GRDF", f"{total_grdf:,}".replace(",", " "))
 
     etats_grdf = gdf.loc[gdf["reseau"] == "GRDF", "etat_serv"].fillna(
@@ -774,5 +1025,28 @@ if __name__ == "__main__":
         ),
         alt="Carte communale des réseaux, des risques et de l’adresse recherchée",
     )
+    if "afficher_profil_terrain" not in st.session_state:
+        st.session_state["afficher_profil_terrain"] = False
+    if st.button(
+        (
+            "Masquer la carte de mesure et le profil terrain"
+            if st.session_state["afficher_profil_terrain"]
+            else "Activer la carte de mesure et le profil terrain"
+        ),
+        key="bouton_profil_terrain",
+    ):
+        st.session_state["afficher_profil_terrain"] = not st.session_state[
+            "afficher_profil_terrain"
+        ]
+    if st.session_state["afficher_profil_terrain"]:
+        afficher_outil_profil_terrain(
+            vue,
+            lon,
+            lat,
+            gdf_carte,
+            couleurs_defaut,
+            reseaux_affiches,
+            zoom_carte,
+        )
     if gdf_carte.empty:
         st.info("Aucun réseau n’est disponible pour cette commune.")
