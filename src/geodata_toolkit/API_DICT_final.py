@@ -14,7 +14,6 @@ import folium
 from folium.plugins import Draw
 from pyproj import Geod
 from shapely.geometry import Point, box, mapping, shape
-from shapely.ops import substring
 import pandas as pd
 from streamlit_folium import st_folium
 from urllib.parse import quote, urlencode
@@ -338,30 +337,6 @@ def tester_api_enedis(dataset: str, commune: str, emprise: dict):
     return resultats
 
 
-def creer_chemins_pointilles(lignes: gpd.GeoDataFrame) -> list:
-    """Découpe les lignes BT en tirets de 18 m séparés par des intervalles de 10 m."""
-    lignes_metriques = lignes.to_crs("EPSG:2154")
-    tirets = []
-    for ligne in lignes_metriques.geometry:
-        longueur = ligne.length
-        debut = 0.0
-        while debut < longueur:
-            fin = min(debut + 18, longueur)
-            tiret = substring(ligne, debut, fin)
-            if tiret.geom_type == "LineString" and not tiret.is_empty:
-                tirets.append(tiret)
-            debut += 28
-
-    if not tirets:
-        return []
-
-    tirets_wgs84 = gpd.GeoSeries(tirets, crs="EPSG:2154").to_crs("EPSG:4326")
-    return [
-        {"coordinates": list(tiret.coords), "info": "Réseau : BT"}
-        for tiret in tirets_wgs84
-    ]
-
-
 def echantillonner_polyligne(
     coordinates: list,
     nombre_points_minimum: int = 10,
@@ -491,12 +466,9 @@ def afficher_outil_profil_terrain(
                 folium.GeoJson(
                     lignes_reseau.to_json(),
                     name=f"Réseau {reseau}",
-                    style_function=lambda _, couleur=couleur, pointille=(
-                        reseau == "BT"
-                    ): {
+                    style_function=lambda _, couleur=couleur: {
                         "color": couleur,
                         "weight": 1.5,
-                        "dashArray": "8, 8" if pointille else None,
                     },
                     tooltip=folium.GeoJsonTooltip(
                         fields=["reseau"],
@@ -756,12 +728,12 @@ if __name__ == "__main__":
 
     couleurs_defaut = {
         "HTA": "#E53935",
-        "BT": "#E53935",
+        "BT": "#1E88E5",
         "GRDF": "#F2C500",
     }
     ligne_reseau = {
         "HTA": ":red[━━━━]",
-        "BT": ":red[╌ ╌ ╌]",
+        "BT": ":blue[━━━━]",
         "GRDF": ":orange[━━━━]",
     }
     reseaux_affiches = st.sidebar.pills(
@@ -1000,15 +972,10 @@ if __name__ == "__main__":
             if lignes_reseau.empty:
                 continue
 
-            donnees_reseau = (
-                creer_chemins_pointilles(lignes_reseau)
-                if reseau == "BT"
-                else lignes_reseau
-            )
             couches.append(
                 pdk.Layer(
                     "PathLayer",
-                    data=donnees_reseau,
+                    data=lignes_reseau,
                     get_path="coordinates",
                     get_color=[
                         int(couleurs_defaut[reseau][i:i + 2], 16)
